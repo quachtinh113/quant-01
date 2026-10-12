@@ -1,0 +1,35 @@
+# Environment & Secret files
+.env
+*.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+
+# Logs & Runtime telemetry
+logs/*.log
+*.log
+
+# IDE & Customizations
+.vscode/
+.idea/
+.agents/
+*.swp
+*.swo
+
+# OS files
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Scratch & Temporary
+temp_*.py
+scratch/
