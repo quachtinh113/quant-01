@@ -15,6 +15,21 @@ account_risk_guard:
   min_margin_level_percent: 200.0 # Stop new entries if free margin level drops below 200%
   max_total_open_positions: 10    # Max total positions allowed across all 5 bots combined
 
+# ---------------------------------------------------------------------
+# CARVER SYSTEMATIC PORTFOLIO ALLOCATION (pysystemtrade / Robert Carver)
+# ---------------------------------------------------------------------
+carver_portfolio:
+  enabled: true
+  annual_target_vol_pct: 16.0     # Target portfolio annualized volatility (16%)
+  idm: 1.42                       # Instrument Diversification Multiplier for 5 assets
+  buffer_fraction: 0.10           # 10% Position buffer to eliminate spread/churn bleed
+  weights:
+    btc_8h: 0.20
+    fx_d1: 0.20
+    gold_sess: 0.25
+    usidx_sess: 0.15
+    nowtrading_mtf: 0.20
+
 bots:
   # -------------------------------------------------------------------
   # BOT 1: Bitcoin 8-Hour Strategy (BTCUSD)

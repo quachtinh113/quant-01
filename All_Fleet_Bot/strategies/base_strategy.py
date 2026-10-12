@@ -57,18 +57,35 @@ class BaseStrategy(ABC):
         sizing_mode: str = "fixed",
         min_lot: float = 0.01,
         max_lot: float = 5.0,
+        forecast: float = 10.0,
+        current_lot: float = 0.0,
     ) -> float:
         """
         Calculates dynamic order volume:
-        1. If sizing_mode == 'dynamic_risk' and sl_distance > 0:
+        1. If sizing_mode == 'carver_systematic':
+           Uses Robert Carver (pysystemtrade) Volatility Targeting + IDM Multiplier + Buffering.
+        2. If sizing_mode == 'dynamic_risk' and sl_distance > 0:
            Uses Andreas Clenow Volatility Parity & Ernie Chan Half-Kelly:
            Lots = (Equity * risk_per_trade_pct) / (sl_distance * contract_size) * half_kelly_multiplier
-        2. Scaled by FleetRiskGuard Drawdown Ladder (1.0x Normal, 0.5x De-risk, 0.0x Halted).
-        3. Clamped strictly between min_lot and max_lot.
+        3. Scaled by FleetRiskGuard Drawdown Ladder (1.0x Normal, 0.5x De-risk, 0.0x Halted).
+        4. Clamped strictly between min_lot and max_lot.
         """
         multiplier = risk_guard.get_risk_multiplier(account_info)
         if multiplier <= 0.0:
             return 0.0
+
+        if sizing_mode == "carver_systematic":
+            lot, _ = risk_guard.calculate_carver_volume(
+                strategy_name=self.name,
+                account_info=account_info,
+                atr_price=sl_distance if sl_distance > 0 else 1.0,
+                contract_size=contract_size,
+                forecast=forecast,
+                min_lot=min_lot,
+                max_lot=max_lot,
+                current_lot=current_lot,
+            )
+            return lot
 
         if sizing_mode == "dynamic_risk" and sl_distance > 0 and contract_size > 0:
             equity = float(account_info.get("equity", 10000.0))
@@ -85,6 +102,7 @@ class BaseStrategy(ABC):
         scaled = target_volume * multiplier
         bounded = max(min_lot, min(max_lot, scaled))
         return round(bounded, 2)
+
 
     def on_tick_update(
         self,

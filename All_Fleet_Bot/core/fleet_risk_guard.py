@@ -7,9 +7,10 @@ Guards equity, max drawdown, and margin levels across all 5 bots.
 import os
 from pathlib import Path
 from datetime import datetime, timezone
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Tuple
 
 from core.audit_logger import get_logger
+from core.carver_portfolio_engine import CarverPortfolioEngine
 
 logger = get_logger()
 
@@ -18,10 +19,12 @@ class FleetRiskGuard:
     """
     Unified Quant Fleet — Fleet Risk Guard
     Account-wide Tier-1 circuit breaker and risk governance.
-    Enforces Institutional Drawdown Ladder (Millennium/Citadel model):
+    Enforces Institutional Drawdown Ladder (Millennium/Citadel model)
+    and Robert Carver Systematic Portfolio Sizing (pysystemtrade model):
     - Tier 1 (-3% DD): Warning log / telemetry flag
     - Tier 2 (-5% DD): Dynamic De-risking (position sizes cut by 50%)
     - Tier 3 (-7.5% DD or absolute USD cap): Hard Circuit Breaker (Halt all trading)
+    - Carver Engine: Multi-asset Volatility Targeting & IDM diversification.
     """
 
     def __init__(
@@ -32,7 +35,9 @@ class FleetRiskGuard:
         derisk_drawdown_pct: float = 0.05,
         min_margin_level_percent: float = 200.0,
         max_total_positions: int = 10,
-        halt_file: str = "HALT_FLEET"
+        halt_file: str = "HALT_FLEET",
+        annual_target_vol_pct: float = 16.0,
+        idm: float = 1.40,
     ):
         self.max_daily_drawdown_usd = max_daily_drawdown_usd
         self.max_daily_drawdown_pct = max_daily_drawdown_pct
@@ -41,6 +46,12 @@ class FleetRiskGuard:
         self.min_margin_level_percent = min_margin_level_percent
         self.max_total_positions = max_total_positions
         self.halt_file = Path(halt_file)
+
+        self.carver_engine = CarverPortfolioEngine(
+            annual_target_vol_pct=annual_target_vol_pct,
+            default_idm=idm,
+            buffer_fraction=0.10
+        )
 
         self._daily_peak_equity = 0.0
         self._current_date = ""
@@ -163,4 +174,44 @@ class FleetRiskGuard:
             "margin_level": account_info.get("margin_level", 0.0),
             "drawdown_tier": tier,
             "risk_multiplier": multiplier,
+            "carver_idm": self.carver_engine.idm,
+            "carver_annual_vol_pct": self.carver_engine.annual_target_vol_pct,
         }
+
+    def calculate_carver_volume(
+        self,
+        strategy_name: str,
+        account_info: Dict[str, Any],
+        atr_price: float,
+        contract_size: float = 100.0,
+        point: float = 0.01,
+        forecast: float = 10.0,
+        min_lot: float = 0.01,
+        max_lot: float = 5.0,
+        current_lot: float = 0.0,
+    ) -> Tuple[float, Dict[str, Any]]:
+        """
+        Calculates position volume using Carver Systematic Sizing and scales by Drawdown Ladder.
+        """
+        equity = float(account_info.get("equity", 10000.0))
+        multiplier = self.get_risk_multiplier(account_info)
+        if multiplier <= 0.0:
+            return 0.0, {"halted": True, "reason": "Risk Desk Multiplier is 0.0"}
+
+        carver_lot, meta = self.carver_engine.calculate_position_size(
+            equity=equity,
+            strategy_name=strategy_name,
+            atr_price=atr_price,
+            contract_size=contract_size,
+            point=point,
+            forecast=forecast,
+            min_lot=min_lot,
+            max_lot=max_lot,
+            current_position_lot=current_lot,
+        )
+
+        scaled_lot = carver_lot * multiplier
+        final_lot = max(min_lot, min(max_lot, round(scaled_lot, 2)))
+        meta["drawdown_multiplier"] = multiplier
+        meta["final_lot"] = final_lot
+        return final_lot, meta

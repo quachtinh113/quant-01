@@ -181,12 +181,16 @@ def main():
         # We still proceed into the loop to let auto-reconnect retry
 
     # 2. Risk Guard
+    carver_cfg = config.get("carver_portfolio", {})
     risk_guard = FleetRiskGuard(
         max_daily_drawdown_usd=float(risk_cfg.get("max_daily_drawdown_usd", 300.0)),
         min_margin_level_percent=float(risk_cfg.get("min_margin_level_percent", 200.0)),
         max_total_positions=int(risk_cfg.get("max_total_positions", 10)),
-        halt_file=str(_ROOT / "HALT_FLEET")
+        halt_file=str(_ROOT / "HALT_FLEET"),
+        annual_target_vol_pct=float(carver_cfg.get("annual_target_vol_pct", 16.0)),
+        idm=float(carver_cfg.get("idm", 1.42)),
     )
+
 
     # 3. Instantiate the 5 Strategies
     strategies = [

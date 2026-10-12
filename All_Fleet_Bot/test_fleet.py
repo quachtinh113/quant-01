@@ -166,8 +166,63 @@ def test_cadence_logic():
     print("   ✅ Strategy schedule gates trigger on exact hours and ignore off-hours.")
 
 
+def test_carver_portfolio_engine():
+    print("👉 [5/6] Testing Carver Systematic Portfolio Engine (pysystemtrade)...")
+    from core.carver_portfolio_engine import CarverPortfolioEngine
+    import numpy as np
+
+    carver = CarverPortfolioEngine(annual_target_vol_pct=16.0, default_idm=1.40, buffer_fraction=0.10)
+    equity = 10000.0
+
+    # 1. Daily cash vol target
+    # 16% / 16 = 1% daily = $100 daily vol target on $10k
+    # With gold_sess weight 0.25 and IDM 1.40: 100 * 0.25 * 1.40 = $35.0
+    cash_vol = carver.get_cash_vol_target(equity, "gold_sess")
+    assert abs(cash_vol - 35.0) < 1e-4, f"Expected 35.0 cash vol, got {cash_vol}"
+
+    # 2. Position Sizing: Gold with ATR = 15.0 pts ($15.00/oz), contract_size = 100
+    # Dollar risk per unit = 15.0 * 100 = $1500 per lot
+    # Target lot = $35.0 / 1500 = 0.0233 -> rounded 0.02 lot
+    lot, meta = carver.calculate_position_size(
+        equity=equity,
+        strategy_name="gold_sess",
+        atr_price=15.0,
+        contract_size=100.0,
+        forecast=10.0,
+        min_lot=0.01,
+        max_lot=2.0
+    )
+    assert lot == 0.02, f"Expected 0.02 lot, got {lot}"
+
+    # 3. Position Buffering (pysystemtrade inert trade buffer)
+    # If target is 0.021 and current is 0.02, diff is 0.001 <= 0.10 * 0.02 -> no churn, keep 0.02
+    buffered = carver.apply_trade_buffer(current_lot=0.02, target_lot=0.021)
+    assert buffered == 0.02, f"Buffer should retain current 0.02, got {buffered}"
+
+    # 4. IDM calculation from uncorrelated matrix
+    corr = np.eye(5)
+    idm = carver.compute_idm_from_correlation(corr)
+    # For 5 equal uncorrelated assets: 1 / sqrt(5 * 0.04) = 1 / sqrt(0.2) = sqrt(5) = 2.236
+    assert abs(idm - np.sqrt(5)) < 1e-3, f"Expected sqrt(5), got {idm}"
+
+    # 5. BaseStrategy integration test with carver_systematic sizing
+    guard = FleetRiskGuard(max_daily_drawdown_usd=300.0, annual_target_vol_pct=16.0, idm=1.40)
+    guard.update_account_state({"equity": 10000.0, "margin": 0.0, "margin_level": 1000.0})
+    s = GoldSessStrategy({"enabled": True, "sizing_mode": "carver_systematic"})
+    order_vol = s.calculate_order_volume(
+        base_volume=0.05,
+        risk_guard=guard,
+        account_info={"equity": 10000.0},
+        sl_distance=15.0,
+        contract_size=100.0,
+        sizing_mode="carver_systematic"
+    )
+    assert order_vol == 0.02, f"BaseStrategy carver volume expected 0.02, got {order_vol}"
+    print("   ✅ Carver Volatility Targeting, IDM, and Buffering verified accurately.")
+
+
 def test_mt5_status():
-    print("👉 [5/5] Testing MT5 Connection Subsystem...")
+    print("👉 [6/6] Testing MT5 Connection Subsystem...")
     mgr = MT5ConnectionManager()
     ok = mgr.connect()
     if ok:
@@ -185,7 +240,9 @@ if __name__ == "__main__":
     test_risk_guard()
     test_config_and_strategies()
     test_cadence_logic()
+    test_carver_portfolio_engine()
     test_mt5_status()
     print("==================================================")
-    print("🎉 ALL 5 TESTS PASSED SUCCESSFULLY!")
+    print("🎉 ALL 6 TESTS PASSED SUCCESSFULLY!")
     print("==================================================\n")
+
