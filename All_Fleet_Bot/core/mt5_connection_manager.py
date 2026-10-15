@@ -38,7 +38,7 @@ TIMEFRAME_MAP = {
 
 class MT5ConnectionManager:
     _instance = None
-    _lock = threading.Lock()
+    _lock = threading.RLock()
 
     def __new__(cls, *args, **kwargs):
         with cls._lock:

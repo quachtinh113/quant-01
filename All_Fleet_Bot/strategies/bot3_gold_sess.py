@@ -21,16 +21,18 @@ class GoldSessStrategy(BaseStrategy):
         self.symbols = config.get("symbols", ["XAUUSDm", "XAGUSDm"])
         self.session_hours = [8, 13]  # 08:00 UTC (London), 13:00 UTC (New York)
         self.sizing_mode = config.get("sizing_mode", "dynamic_risk")
-        self.risk_per_trade_pct = config.get("risk_per_trade_pct", 0.005)
-        self.half_kelly_mult = config.get("half_kelly_multiplier", 0.50)
-        self.base_lot = config.get("base_lot", 0.05)
+        self.risk_per_trade_pct = config.get("risk_per_trade_pct", 0.65)
+        self.half_kelly_mult = config.get("half_kelly_multiplier", 1.00)
+        self.base_lot = config.get("base_lot", 0.02)
         self.min_lot = config.get("min_lot", 0.01)
-        self.max_lot = config.get("max_lot", 2.0)
+        self.max_lot = config.get("max_lot", 0.04)
+        self.breakeven_trigger_atr = float(config.get("breakeven_trigger_atr", 1.0))
         self.sl_atr_mult = config.get("sl_atr_multiplier", 2.0)
-        self.tp_atr_mult = config.get("tp_atr_multiplier", 2.5)
-        self.spread_limit = config.get("spread_limit_points", 60)
-        self.hourly_mode = config.get("hourly_mode", True)
+        self.tp_atr_mult = config.get("tp_atr_multiplier", 3.0)
+        self.spread_limit = config.get("spread_limit_points", 350)
+        self.hourly_mode = config.get("hourly_mode", False)
         self._last_processed_hour = -1
+        self._last_processed_session = -1
 
     def should_run_cycle(self, now_utc: datetime) -> bool:
         if not self.enabled:
@@ -138,6 +140,7 @@ class GoldSessStrategy(BaseStrategy):
                     sizing_mode=self.sizing_mode,
                     min_lot=self.min_lot,
                     max_lot=self.max_lot,
+                    symbol=symbol,
                 )
                 res = mt5_mgr.open_market_order(
                     symbol=symbol,
@@ -199,7 +202,7 @@ class GoldSessStrategy(BaseStrategy):
             if atr <= 0:
                 continue
 
-            be_threshold = 1.5 * atr
+            be_threshold = self.breakeven_trigger_atr * atr
             trail_threshold = 2.0 * atr
             buffer_points = 10 * point  # Buffer covering spread/slippage
 
@@ -210,7 +213,7 @@ class GoldSessStrategy(BaseStrategy):
                     new_sl = open_price + buffer_points
                     logger.info(
                         f"🛡️ [{self.name}] Breakeven triggered for {symbol} BUY #{ticket}: "
-                        f"Gain +${gain:.2f} >= +${be_threshold:.2f} (1.5x ATR). Moving SL to {new_sl:.3f}"
+                        f"Gain +${gain:.2f} >= +${be_threshold:.2f} ({self.breakeven_trigger_atr}x ATR). Moving SL to {new_sl:.3f}"
                     )
                     mt5_mgr.modify_position(ticket=ticket, sl=new_sl, tp=current_tp)
                     current_sl = new_sl
@@ -232,7 +235,7 @@ class GoldSessStrategy(BaseStrategy):
                     new_sl = open_price - buffer_points
                     logger.info(
                         f"🛡️ [{self.name}] Breakeven triggered for {symbol} SELL #{ticket}: "
-                        f"Gain +${gain:.2f} >= +${be_threshold:.2f} (1.5x ATR). Moving SL to {new_sl:.3f}"
+                        f"Gain +${gain:.2f} >= +${be_threshold:.2f} ({self.breakeven_trigger_atr}x ATR). Moving SL to {new_sl:.3f}"
                     )
                     mt5_mgr.modify_position(ticket=ticket, sl=new_sl, tp=current_tp)
                     current_sl = new_sl

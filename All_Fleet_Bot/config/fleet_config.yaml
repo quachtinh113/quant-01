@@ -11,9 +11,31 @@ system:
   log_dir: "logs"
 
 account_risk_guard:
-  max_daily_drawdown_usd: 300.0   # Stop opening new positions if daily loss exceeds this
+  max_daily_drawdown_usd: 150.0   # Stop opening new positions if daily loss exceeds $150 (-1.5%)
+  max_daily_loss_pct: 1.5         # Hard circuit breaker: Halt if daily loss >= 1.5% (-$150)
+  daily_profit_target_pct: 1.5    # Daily target: Lock in profit by reducing lot sizes 50% once +1.5% (+$150) is reached
+  daily_profit_target_usd: 150.0  # Daily profit target in USD
+  max_total_open_risk_pct: 2.0    # Max total open risk across all positions (2.0%)
   min_margin_level_percent: 200.0 # Stop new entries if free margin level drops below 200%
   max_total_open_positions: 10    # Max total positions allowed across all 5 bots combined
+  max_lot_gold: 0.04              # Hard lot cap for Gold
+  max_lot_btc: 0.04               # Hard lot cap for BTC
+  max_lot_fx: 0.06                # Hard lot cap for FX
+
+# ---------------------------------------------------------------------
+# CARVER SYSTEMATIC PORTFOLIO ALLOCATION (pysystemtrade / Robert Carver)
+# ---------------------------------------------------------------------
+carver_portfolio:
+  enabled: true
+  annual_target_vol_pct: 16.0     # Target portfolio annualized volatility (16%)
+  idm: 1.42                       # Instrument Diversification Multiplier for 5 assets
+  buffer_fraction: 0.10           # 10% Position buffer to eliminate spread/churn bleed
+  weights:
+    btc_8h: 0.20
+    fx_d1: 0.20
+    gold_sess: 0.25
+    usidx_sess: 0.15
+    nowtrading_mtf: 0.20
 
 bots:
   # -------------------------------------------------------------------
@@ -25,8 +47,11 @@ bots:
     symbol: "BTCUSDm"
     cadence_hours: 8              # Runs at 00:00, 08:00, 16:00 UTC
     decision_utc_hours: [0, 8, 16]
+    sizing_mode: "dynamic_risk"    # Dynamic ATR risk sizing
+    risk_per_trade_pct: 0.50      # ~0.50% equity risk (~$50/trade on $10k equity)
     base_lot: 0.01
-    max_lot: 0.05
+    min_lot: 0.01
+    max_lot: 0.04                 # Hard ceiling max_lot_btc: 0.04
     sl_atr_multiplier: 2.0
     tp_atr_multiplier: 3.0
     spread_limit_points: 2000
@@ -45,8 +70,11 @@ bots:
       - "USDCADm"
     decision_utc_hour: 20          # 20:00 UTC (Server daily candle close / rollover)
     decision_weekdays: [1, 2, 3, 4, 5] # Tue-Sat morning UTC
+    sizing_mode: "dynamic_risk"    # Dynamic ATR risk sizing
+    risk_per_trade_pct: 0.40      # ~0.40% equity risk (~$40/trade on $10k equity)
     base_lot: 0.02
-    max_lot: 0.05
+    min_lot: 0.01
+    max_lot: 0.06                 # Hard ceiling max_lot_fx: 0.06
     sl_atr_multiplier: 1.5
     tp_atr_multiplier: 2.5
     spread_limit_points: 50
@@ -56,7 +84,7 @@ bots:
   # -------------------------------------------------------------------
   gold_sess:
     enabled: true
-    hourly_mode: true              # Quét tín hiệu mỗi giờ (Hourly) thay vì chỉ 2 phiên/ngày
+    hourly_mode: false             # Chi quét 2 phiên lon London (08:00 UTC) va New York (13:00 UTC) chong whipsaw
     magic: 260903
     symbols:
       - "XAUUSDm"
@@ -65,15 +93,16 @@ bots:
         utc_hour: 8                # 08:00 UTC (London session start)
       new_york:
         utc_hour: 13               # 13:00 UTC (New York session start)
-    # Sizing Architecture: Andreas Clenow Volatility Parity + Half-Kelly
+    # Sizing Architecture: Dynamic ATR sizing for $100-$200 daily target
     sizing_mode: "dynamic_risk"    # "dynamic_risk" (theo vốn & ATR SL) hoặc "fixed"
-    risk_per_trade_pct: 0.005      # 0.5% vốn rủi ro ($50 trên $10,000)
-    half_kelly_multiplier: 0.50    # Hệ số Half-Kelly
-    base_lot: 0.05                 # Dùng khi sizing_mode là "fixed"
+    risk_per_trade_pct: 0.65      # ~0.65% vốn rủi ro ($65 trên $10,000, TP 2.5R-3R đạt $160-$195)
+    breakeven_trigger_atr: 1.0     # Khoá Breakeven sớm tại 1.0 ATR
+    half_kelly_multiplier: 1.00    # Full sizing per risk target
+    base_lot: 0.02                 # Dùng khi sizing_mode là "fixed"
     min_lot: 0.01                  # Sàn tối thiểu broker
-    max_lot: 2.00                  # Không giới hạn 0.01, mở trần an toàn lên tới 2.0 lot
+    max_lot: 0.04                  # Hard ceiling max_lot_gold: 0.04
     sl_atr_multiplier: 2.0
-    tp_atr_multiplier: 2.5
+    tp_atr_multiplier: 3.0         # TP 3R đạt $195
     spread_limit_points: 350
 
   # -------------------------------------------------------------------
