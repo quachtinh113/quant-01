@@ -71,7 +71,7 @@ bots:
   # -------------------------------------------------------------------
   gold_sess:
     enabled: true
-    hourly_mode: true              # Quét tín hiệu mỗi giờ (Hourly) thay vì chỉ 2 phiên/ngày
+    hourly_mode: false             # Chi quét 2 phiên lon London (08:00 UTC) va New York (13:00 UTC)
     magic: 260903
     symbols:
       - "XAUUSDm"

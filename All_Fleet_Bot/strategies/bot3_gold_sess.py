@@ -31,6 +31,7 @@ class GoldSessStrategy(BaseStrategy):
         self.spread_limit = config.get("spread_limit_points", 60)
         self.hourly_mode = config.get("hourly_mode", True)
         self._last_processed_hour = -1
+        self._last_processed_session = -1
 
     def should_run_cycle(self, now_utc: datetime) -> bool:
         if not self.enabled:
