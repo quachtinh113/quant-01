@@ -50,7 +50,11 @@ class Btc8hStrategy(BaseStrategy):
         super().__init__(name="BTC_8H", magic=config.get("magic", 260904), config=config)
         self.symbol = config.get("symbol", "BTCUSDm")
         self.decision_hours = config.get("decision_utc_hours", [0, 8, 16])
+        self.sizing_mode = config.get("sizing_mode", "dynamic_risk")
+        self.risk_per_trade_pct = config.get("risk_per_trade_pct", 0.50)
         self.base_lot = config.get("base_lot", 0.01)
+        self.min_lot = config.get("min_lot", 0.01)
+        self.max_lot = config.get("max_lot", 0.04)
         self.sl_atr_mult = config.get("sl_atr_multiplier", 2.0)
         self.tp_atr_mult = config.get("tp_atr_multiplier", 3.0)
         self.spread_limit = config.get("spread_limit_points", 2000)
@@ -162,11 +166,25 @@ class Btc8hStrategy(BaseStrategy):
                 self.last_action = f"VETO: {reason}"
                 return
 
-            price = tick["ask"] if signal == "BUY" else tick["bid"]
-            sl = price - (atr * self.sl_atr_mult) if signal == "BUY" else price + (atr * self.sl_atr_mult)
-            tp = price + (atr * self.tp_atr_mult) if signal == "BUY" else price - (atr * self.tp_atr_mult)
+            sl_dist = atr * self.sl_atr_mult
+            tp_dist = atr * self.tp_atr_mult
+            sl = price - sl_dist if signal == "BUY" else price + sl_dist
+            tp = price + tp_dist if signal == "BUY" else price - tp_dist
 
-            order_vol = self.calculate_order_volume(self.base_lot, risk_guard, account_info)
+            contract_size = spec.get("contract_size", 1.0) if spec else 1.0
+            order_vol = self.calculate_order_volume(
+                base_volume=self.base_lot,
+                risk_guard=risk_guard,
+                account_info=account_info,
+                sl_distance=sl_dist,
+                contract_size=contract_size,
+                risk_per_trade_pct=self.risk_per_trade_pct,
+                half_kelly_multiplier=1.0,
+                sizing_mode=self.sizing_mode,
+                min_lot=self.min_lot,
+                max_lot=self.max_lot,
+                symbol=self.symbol,
+            )
             res = mt5_mgr.open_market_order(
                 symbol=self.symbol,
                 direction=signal,

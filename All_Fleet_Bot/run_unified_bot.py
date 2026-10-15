@@ -139,8 +139,9 @@ def print_fleet_dashboard(account_info, risk_status, bot_summaries):
         f"Balance: ${account_info.get('balance', 0):,.2f} | Equity: ${account_info.get('equity', 0):,.2f} | "
         f"Margin Level: {account_info.get('margin_level', 0):.1f}%",
         f" Daily Peak: ${risk_status.get('daily_peak_equity', 0):,.2f} | "
-        f"Current DD: ${risk_status.get('current_drawdown_usd', 0):.2f} / Max ${risk_status.get('drawdown_limit_usd', 0):.2f} | "
-        f"Status: {'🔴 HALTED' if risk_status.get('is_halted') else '🟢 ACTIVE'}",
+        f"DD: ${risk_status.get('current_drawdown_usd', 0):.2f} / Max ${risk_status.get('drawdown_limit_usd', 0):.2f} | "
+        f"Daily PnL: ${risk_status.get('daily_pnl_usd', 0):+.2f} ({risk_status.get('daily_pnl_pct', 0):+.2f}%) | "
+        f"Status: {'🔴 HALTED' if risk_status.get('is_halted') else ('🟡 0.5x DERISK/LOCK' if risk_status.get('risk_multiplier') == 0.5 else '🟢 ACTIVE')}",
         "------------------------------------------------------------------------------------------",
         f" {'Bot Name':<16} | {'Magic':<7} | {'Status':<8} | {'Open Pos':<8} | {'Unrealized P/L':<14} | {'Last Action'}",
         "------------------------------------------------------------------------------------------",
@@ -183,12 +184,21 @@ def main():
     # 2. Risk Guard
     carver_cfg = config.get("carver_portfolio", {})
     risk_guard = FleetRiskGuard(
-        max_daily_drawdown_usd=float(risk_cfg.get("max_daily_drawdown_usd", 300.0)),
+        max_daily_drawdown_usd=float(risk_cfg.get("max_daily_loss_usd", risk_cfg.get("max_daily_drawdown_usd", 150.0))),
+        max_daily_drawdown_pct=float(risk_cfg.get("max_daily_loss_pct", 1.5)) / 100.0 if float(risk_cfg.get("max_daily_loss_pct", 1.5)) > 0.05 else float(risk_cfg.get("max_daily_loss_pct", 0.015)),
+        max_daily_loss_usd=float(risk_cfg.get("max_daily_loss_usd", risk_cfg.get("max_daily_drawdown_usd", 150.0))),
+        max_daily_loss_pct=float(risk_cfg.get("max_daily_loss_pct", 1.5)) / 100.0 if float(risk_cfg.get("max_daily_loss_pct", 1.5)) > 0.05 else float(risk_cfg.get("max_daily_loss_pct", 0.015)),
+        daily_profit_target_pct=float(risk_cfg.get("daily_profit_target_pct", 1.5)) / 100.0 if float(risk_cfg.get("daily_profit_target_pct", 1.5)) > 0.05 else float(risk_cfg.get("daily_profit_target_pct", 0.015)),
+        daily_profit_target_usd=float(risk_cfg.get("daily_profit_target_usd", 150.0)),
+        max_total_open_risk_pct=float(risk_cfg.get("max_total_open_risk_pct", 2.0)) / 100.0 if float(risk_cfg.get("max_total_open_risk_pct", 2.0)) > 0.05 else float(risk_cfg.get("max_total_open_risk_pct", 0.02)),
         min_margin_level_percent=float(risk_cfg.get("min_margin_level_percent", 200.0)),
-        max_total_positions=int(risk_cfg.get("max_total_positions", 10)),
+        max_total_positions=int(risk_cfg.get("max_total_open_positions", risk_cfg.get("max_total_positions", 10))),
         halt_file=str(_ROOT / "HALT_FLEET"),
         annual_target_vol_pct=float(carver_cfg.get("annual_target_vol_pct", 16.0)),
         idm=float(carver_cfg.get("idm", 1.42)),
+        max_lot_gold=float(risk_cfg.get("max_lot_gold", 0.04)),
+        max_lot_btc=float(risk_cfg.get("max_lot_btc", 0.04)),
+        max_lot_fx=float(risk_cfg.get("max_lot_fx", 0.06)),
     )
 
 
