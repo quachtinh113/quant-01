@@ -11,31 +11,34 @@ system:
   log_dir: "logs"
 
 account_risk_guard:
-  max_daily_drawdown_usd: 150.0   # Stop opening new positions if daily loss exceeds $150 (-1.5%)
-  max_daily_loss_pct: 1.5         # Hard circuit breaker: Halt if daily loss >= 1.5% (-$150)
-  daily_profit_target_pct: 1.5    # Daily target: Lock in profit by reducing lot sizes 50% once +1.5% (+$150) is reached
-  daily_profit_target_usd: 150.0  # Daily profit target in USD
-  max_total_open_risk_pct: 2.0    # Max total open risk across all positions (2.0%)
-  min_margin_level_percent: 200.0 # Stop new entries if free margin level drops below 200%
-  max_total_open_positions: 10    # Max total positions allowed across all 5 bots combined
-  max_lot_gold: 0.04              # Hard lot cap for Gold
-  max_lot_btc: 0.04               # Hard lot cap for BTC
-  max_lot_fx: 0.06                # Hard lot cap for FX
+  # ===================================================================
+  # 🎯 DAILY CIRCUIT BREAKER & PROFIT LOCK ARCHITECTURE (TARGET: $13/DAY)
+  # ===================================================================
+  daily_profit_target_usd: 20.0   # Daily profit lock: Lock in profit and halt opening when +$20.00 is achieved
+  daily_profit_target_pct: 0.20   # ~0.20% equity profit target on $10,000
+  max_daily_drawdown_usd: 15.0    # Hard Daily Circuit Breaker: Halt all trading if loss reaches -$15.00/day
+  max_daily_loss_pct: 0.15        # Hard kill-switch at -0.15% daily loss (-$15.00)
+  max_total_open_risk_pct: 1.0    # Strict risk ceiling (1.0% max total open risk)
+  min_margin_level_percent: 300.0 # Strict margin buffer (Halt new trades if margin < 300%)
+  max_total_open_positions: 3     # Focus strictly on max 3 high-conviction positions
+  max_lot_gold: 0.02              # Strict lot cap for Gold
+  max_lot_btc: 0.03               # Dedicated lot capacity for BTC_8H (0.01 - 0.03 BTC)
+  max_lot_fx: 0.04                # Calibrated lot cap for FX (0.02 - 0.04 lot)
 
 # ---------------------------------------------------------------------
-# CARVER SYSTEMATIC PORTFOLIO ALLOCATION (pysystemtrade / Robert Carver)
+# CARVER SYSTEMATIC PORTFOLIO ALLOCATION (CORE-SATELLITE MODEL)
 # ---------------------------------------------------------------------
 carver_portfolio:
   enabled: true
   annual_target_vol_pct: 16.0     # Target portfolio annualized volatility (16%)
-  idm: 1.42                       # Instrument Diversification Multiplier for 5 assets
+  idm: 1.42                       # Instrument Diversification Multiplier
   buffer_fraction: 0.10           # 10% Position buffer to eliminate spread/churn bleed
   weights:
-    btc_8h: 0.20
-    fx_d1: 0.20
-    gold_sess: 0.25
-    usidx_sess: 0.15
-    nowtrading_mtf: 0.20
+    btc_8h: 0.55                  # Core Alpha Engine: 55% Capital Allocation (Top Performer)
+    fx_d1: 0.30                   # Stable Trend Defender: 30% Capital Allocation (5 FX Majors)
+    gold_sess: 0.15               # Selective Session Satellite: 15% (Asian Breakout Filtered)
+    usidx_sess: 0.00              # US Indices Satellite: 0% (Standby)
+    nowtrading_mtf: 0.00          # M15 Churn Bot: 0% (ISOLATED / DISABLED)
 
 bots:
   # -------------------------------------------------------------------
@@ -93,23 +96,24 @@ bots:
         utc_hour: 8                # 08:00 UTC (London session start)
       new_york:
         utc_hour: 13               # 13:00 UTC (New York session start)
-    # Sizing Architecture: Dynamic ATR sizing for $100-$200 daily target
-    sizing_mode: "dynamic_risk"    # "dynamic_risk" (theo vốn & ATR SL) hoặc "fixed"
-    risk_per_trade_pct: 0.65      # ~0.65% vốn rủi ro ($65 trên $10,000, TP 2.5R-3R đạt $160-$195)
+    use_asian_breakout_filter: true # Bo loc breakout bien do phien A (00:00 - 07:00 UTC) chong rang co
+    atr_expansion_filter: true     # Chi vao lenh khi ATR14 > Trung binh ATR20 (thi truong co song thuc su)
+    sizing_mode: "dynamic_risk"    # Dynamic ATR risk sizing
+    risk_per_trade_pct: 0.50      # ~0.50% equity risk
     breakeven_trigger_atr: 1.0     # Khoá Breakeven sớm tại 1.0 ATR
     half_kelly_multiplier: 1.00    # Full sizing per risk target
-    base_lot: 0.02                 # Dùng khi sizing_mode là "fixed"
-    min_lot: 0.01                  # Sàn tối thiểu broker
+    base_lot: 0.01
+    min_lot: 0.01
     max_lot: 0.04                  # Hard ceiling max_lot_gold: 0.04
-    sl_atr_multiplier: 2.0
-    tp_atr_multiplier: 3.0         # TP 3R đạt $195
+    sl_atr_multiplier: 1.5         # SL dong theo ATR
+    tp_atr_multiplier: 2.5         # TP dong theo ATR (2.5R)
     spread_limit_points: 350
 
   # -------------------------------------------------------------------
   # BOT 4: US Indices Session Strategy (US500 & USTEC)
   # -------------------------------------------------------------------
   usidx_sess:
-    enabled: true
+    enabled: false                # Standby / 0% Carver allocation
     magic: 260902
     symbols:
       - "US500m"
@@ -129,32 +133,30 @@ bots:
   # BOT 5: NowTrading 2.1 Multi-Timeframe Strategy (RSI + ADX + ATR DCA)
   # -------------------------------------------------------------------
   nowtrading_mtf:
-    enabled: true
+    enabled: false                 # Tam thoi co lap / scale-down tren M15 de tinh chinh giam tan suat lenh rac
+    scale_down: true
     magic: 260905
     legacy_magic: 202500           # Also tracks legacy open positions
     symbols:
       - "XAUUSDm"
-      - "USDCADm"
-      - "USDCHFm"
-      - "NZDUSDm"
-      - "BTCUSDm"
-      - "USDJPYm"
+      - "EURUSDm"
     base_lots:
-      FX: 0.02
+      FX: 0.01
       GOLD: 0.01
       CRYPTO: 0.01
       INDEX: 0.01
-    max_lot: 0.10
+    max_lot: 0.02
     rsi_period: 14
-    rsi_buy_threshold: 53.0
-    rsi_sell_threshold: 47.0
+    rsi_buy_threshold: 58.0        # Tang nguong loc tu 53.0 len 58.0 tranh nhieu
+    rsi_sell_threshold: 42.0       # Ha nguong loc tu 47.0 xuong 42.0 tranh nhieu
     rsi_pullback_threshold: 50.0
     adx_period: 14
     adx_trend_threshold: 22.0
     atr_period: 14
+    use_dynamic_atr_tp: true       # Chuyen TP sang dong theo ATR (2.5x ATR) thay vi co dinh $5.00
+    tp_atr_multiplier: 2.5
+    sl_atr_multiplier: 1.5
     max_dca_layers: 0
-    dca_layer_1_atr: 2.3
-    dca_layer_2_atr: 3.5
     profit_target_usd: 5.0
     holding_max_hours: 24
     holding_reduce_hours: 12

@@ -95,23 +95,37 @@ class GoldSessStrategy(BaseStrategy):
             current_price = tick["bid"]
             atr = last_bar['atr']
 
-            # Session momentum check: EMA9 vs EMA21 on H1
+            # Volatility expansion filter: ATR must be expanding
+            atr_ma = df['atr'].rolling(20).mean().iloc[-2]
+            vol_ok = (atr >= atr_ma * 0.90) if not np.isnan(atr_ma) and atr_ma > 0 else True
+
+            # Breakout Filter:
+            # - London (08:00 UTC): Breakout of Asian Range (00:00 - 07:00 UTC, last 8 H1 bars)
+            # - NY (13:00 UTC): Breakout of London Range (08:00 - 12:00 UTC, last 5 H1 bars)
+            lookback = 8 if now_utc.hour == 8 else 5
+            ref_high = df['high'].iloc[-lookback-1:-1].max()
+            ref_low = df['low'].iloc[-lookback-1:-1].min()
+
+            # Session momentum check: EMA9 vs EMA21 + Breakout
             ema9 = df['close'].ewm(span=9, adjust=False).mean().iloc[-2]
             ema21 = df['close'].ewm(span=21, adjust=False).mean().iloc[-2]
+            c_close = last_bar['close']
 
             existing = [p for p in self.open_positions if p["symbol"] == symbol]
 
-            # Relaxed signal: EMA9 vs EMA21 trend direction
             signal = None
-            if ema9 > ema21:
-                signal = "BUY"
-            elif ema9 < ema21:
-                signal = "SELL"
+            if vol_ok:
+                if ema9 > ema21 and c_close > ref_high:
+                    signal = "BUY"
+                elif ema9 < ema21 and c_close < ref_low:
+                    signal = "SELL"
+                else:
+                    logger.info(
+                        f"ℹ️ [{self.name}] {symbol} inside range (HOLD): "
+                        f"Close={c_close:.2f}, High={ref_high:.2f}, Low={ref_low:.2f}"
+                    )
             else:
-                logger.info(
-                    f"ℹ️ [{self.name}] {symbol} No Signal (HOLD): "
-                    f"Price={current_price:.3f}, EMA9={ema9:.3f}, EMA21={ema21:.3f}"
-                )
+                logger.info(f"ℹ️ [{self.name}] {symbol} Volatility low (ATR {atr:.2f} < MA {atr_ma:.2f}). Skipping.")
 
             if len(existing) > 0:
                 logger.info(f"ℹ️ [{self.name}] {symbol} already has {len(existing)} open position(s). Skipping entry.")
