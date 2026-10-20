@@ -1,6 +1,6 @@
 """
 Unified Quant Fleet — Bot 1: Bitcoin 8-Hour Strategy (exness_btc_8h)
-Magic: 260904 | Symbol: BTCUSDm | Cadence: 8-Hour (00:00, 08:00, 16:00 UTC)
+Magic: 260904 | Symbol: BTCUSDm | Cadence: 8-Hour (00:00, 08:00, 16:00 UTC) | 24/7 Resilient Runtime v1.1
 """
 
 from datetime import datetime, timezone
@@ -159,13 +159,18 @@ class Btc8hStrategy(BaseStrategy):
         # Open New Position if no existing position
         if len(self.open_positions) == 0 and signal is not None:
             can_open, reason = risk_guard.can_open_position(
-                account_info, len(mt5_mgr.get_positions())
+                account_info=account_info,
+                current_position_count=len(mt5_mgr.get_positions()),
+                open_positions=mt5_mgr.get_positions(),
+                symbol=self.symbol,
+                signal=signal
             )
             if not can_open:
                 logger.warning(f"⛔ [{self.name}] Risk guard vetoed entry: {reason}")
                 self.last_action = f"VETO: {reason}"
                 return
 
+            price = tick["ask"] if signal == "BUY" else tick["bid"]
             sl_dist = atr * self.sl_atr_mult
             tp_dist = atr * self.tp_atr_mult
             sl = price - sl_dist if signal == "BUY" else price + sl_dist
@@ -200,3 +205,6 @@ class Btc8hStrategy(BaseStrategy):
                 self.last_action = f"ERROR: {res.get('error')}"
         else:
             self.last_action = f"HOLD ({len(self.open_positions)} active)"
+
+        # Memory hygiene: release DataFrame
+        del df

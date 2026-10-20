@@ -58,6 +58,8 @@ def setup_logger(log_dir: str = "logs", log_level: str = "INFO", log_filename: s
     # Do not propagate to root logger to avoid duplicate console lines
     logger.propagate = False
 
+    logger.info(f"📑 RotatingFileHandler initialized: {log_file} (maxBytes=10MB, backupCount=5, UTF-8)")
+
     _logger = logger
     return _logger
 

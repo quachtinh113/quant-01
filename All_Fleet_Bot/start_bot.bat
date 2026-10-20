@@ -58,6 +58,16 @@ python run_unified_bot.py
 :: Check exit code
 set EXIT_CODE=%ERRORLEVEL%
 
+if %EXIT_CODE% EQU 42 (
+    echo.
+    echo =======================================================
+    echo  [WATCHDOG] Code modification detected [exit code 42]
+    echo  Reloading updated codebase immediately...
+    echo =======================================================
+    set /a RESTART_COUNT=0
+    goto start_loop
+)
+
 if %EXIT_CODE% EQU 0 (
     echo.
     echo =======================================================

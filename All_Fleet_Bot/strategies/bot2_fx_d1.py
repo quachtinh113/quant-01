@@ -106,11 +106,18 @@ class FxD1Strategy(BaseStrategy):
                         mt5_mgr.close_position(p["ticket"])
                         actions_taken.append(f"CLOSE #{p['ticket']}")
             elif signal is not None:
-                can_open, reason = risk_guard.can_open_position(account_info, len(mt5_mgr.get_positions()))
+                can_open, reason = risk_guard.can_open_position(
+                    account_info=account_info,
+                    current_position_count=len(mt5_mgr.get_positions()),
+                    open_positions=mt5_mgr.get_positions(),
+                    symbol=symbol,
+                    signal=signal
+                )
                 if not can_open:
                     logger.warning(f"⛔ [{self.name}] Risk guard vetoed {symbol}: {reason}")
-                    break
+                    continue
 
+                price = tick["ask"] if signal == "BUY" else tick["bid"]
                 sl_dist = atr * self.sl_atr_mult
                 tp_dist = atr * self.tp_atr_mult
                 sl = price - sl_dist if signal == "BUY" else price + sl_dist
@@ -141,5 +148,8 @@ class FxD1Strategy(BaseStrategy):
                 )
                 if res.get("success"):
                     actions_taken.append(f"OPEN {symbol} {signal}")
+
+            # Memory hygiene: release DataFrame for this symbol
+            del df
 
         self.last_action = ", ".join(actions_taken) if actions_taken else "HOLD"

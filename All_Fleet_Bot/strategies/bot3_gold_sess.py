@@ -131,7 +131,13 @@ class GoldSessStrategy(BaseStrategy):
                 logger.info(f"ℹ️ [{self.name}] {symbol} already has {len(existing)} open position(s). Skipping entry.")
 
             if len(existing) == 0 and signal is not None:
-                can_open, reason = risk_guard.can_open_position(account_info, len(mt5_mgr.get_positions()))
+                can_open, reason = risk_guard.can_open_position(
+                    account_info=account_info,
+                    current_position_count=len(mt5_mgr.get_positions()),
+                    open_positions=mt5_mgr.get_positions(),
+                    symbol=symbol,
+                    signal=signal
+                )
                 if not can_open:
                     logger.warning(f"⛔ [{self.name}] Risk veto for {symbol}: {reason}")
                     continue
@@ -167,6 +173,9 @@ class GoldSessStrategy(BaseStrategy):
                 )
                 if res.get("success"):
                     actions.append(f"OPEN {symbol} {signal} {order_vol}L")
+
+            # Memory hygiene: release DataFrame
+            del df
 
         self.last_action = ", ".join(actions) if actions else "HOLD"
 

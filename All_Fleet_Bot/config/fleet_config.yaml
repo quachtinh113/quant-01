@@ -6,6 +6,7 @@
 system:
   execution_mode: "live"         # "live" (send real orders) or "paper" / "shadow" (log only)
   loop_interval_seconds: 15       # Master loop polling frequency in seconds
+  weekend_loop_interval_seconds: 60 # Cooled-down polling frequency when traditional markets are closed
   timezone: "UTC"
   log_level: "INFO"
   log_dir: "logs"
@@ -24,6 +25,13 @@ account_risk_guard:
   max_lot_gold: 0.02              # Strict lot cap for Gold
   max_lot_btc: 0.03               # Dedicated lot capacity for BTC_8H (0.01 - 0.03 BTC)
   max_lot_fx: 0.04                # Calibrated lot cap for FX (0.02 - 0.04 lot)
+  max_net_usd_units: 2            # Portfolio Correlation Gatekeeper: Max ±2 net USD exposure units
+  dynamic_covariance:
+    enabled: true
+    timeframe: "H1"
+    lookback: 90                  # Rolling 90-hour window
+    max_pairwise_corr: 0.75       # Dynamic pairwise correlation ceiling
+    max_portfolio_vol: 0.035      # Max allowable projected portfolio hourly volatility (3.5%)
 
 # ---------------------------------------------------------------------
 # CARVER SYSTEMATIC PORTFOLIO ALLOCATION (CORE-SATELLITE MODEL)

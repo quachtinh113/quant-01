@@ -74,6 +74,8 @@ class FleetRiskGuard:
             buffer_fraction=0.10
         )
 
+        self.correlation_manager = None
+        self.dyn_cov_manager = None
         self._daily_peak_equity = 0.0
         self._start_of_day_equity = 0.0
         self._daily_pnl_usd = 0.0
@@ -82,6 +84,14 @@ class FleetRiskGuard:
         self._is_halted = False
         self._halt_reason = ""
         self._warning_logged = False
+
+    def set_correlation_manager(self, manager) -> None:
+        """Attach CorrelationRiskManager to Central Risk Guard."""
+        self.correlation_manager = manager
+
+    def set_dynamic_covariance_manager(self, manager) -> None:
+        """Attach DynamicCovarianceRiskManager to Central Risk Guard."""
+        self.dyn_cov_manager = manager
 
     def get_max_lot(self, symbol: str) -> float:
         """Return hard lot ceiling for specific instrument class."""
@@ -182,7 +192,9 @@ class FleetRiskGuard:
         self,
         account_info: Dict[str, Any],
         current_position_count: int,
-        open_positions: Optional[List[Dict[str, Any]]] = None
+        open_positions: Optional[List[Dict[str, Any]]] = None,
+        symbol: Optional[str] = None,
+        signal: Optional[str] = None
     ) -> tuple[bool, str]:
         """
         Check whether opening a new position is permitted.
@@ -253,6 +265,26 @@ class FleetRiskGuard:
                     total_open_risk += dist * c_size * vol
             if equity > 0 and (total_open_risk / equity) >= self.max_total_open_risk_pct:
                 return False, f"Max total open risk reached: {total_open_risk/equity*100:.2f}% >= {self.max_total_open_risk_pct*100:.1f}% limit"
+
+        # 8. Portfolio Correlation & Exposure Gatekeeper (Max Net USD Exposure)
+        if self.correlation_manager and symbol and signal:
+            allowed, reason = self.correlation_manager.can_execute_order(
+                symbol=symbol,
+                order_type=signal,
+                open_positions=open_positions
+            )
+            if not allowed:
+                return False, reason
+
+        # 9. Dynamic Ledoit-Wolf Covariance & Correlation Gatekeeper (Regime-Aware)
+        if self.dyn_cov_manager and symbol and signal:
+            allowed, reason = self.dyn_cov_manager.can_execute_order(
+                target_symbol=symbol,
+                target_signal=signal,
+                open_positions=open_positions
+            )
+            if not allowed:
+                return False, reason
 
         return True, "OK"
 
