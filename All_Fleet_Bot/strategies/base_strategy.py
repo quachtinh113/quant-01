@@ -53,38 +53,83 @@ class BaseStrategy(ABC):
         sl_distance: float = 0.0,
         contract_size: float = 100.0,
         risk_per_trade_pct: float = 0.005,
-        half_kelly_multiplier: float = 0.50,
-        sizing_mode: str = "fixed",
+        half_kelly_multiplier: float = 1.0,
+        sizing_mode: str = "dynamic_risk",
         min_lot: float = 0.01,
         max_lot: float = 5.0,
+        forecast: float = 10.0,
+        current_lot: float = 0.0,
+        symbol: str = "",
     ) -> float:
         """
         Calculates dynamic order volume:
-        1. If sizing_mode == 'dynamic_risk' and sl_distance > 0:
+        1. If sizing_mode == 'carver_systematic':
+           Uses Robert Carver (pysystemtrade) Volatility Targeting + IDM Multiplier + Buffering.
+        2. If sizing_mode == 'dynamic_risk' and sl_distance > 0:
            Uses Andreas Clenow Volatility Parity & Ernie Chan Half-Kelly:
-           Lots = (Equity * risk_per_trade_pct) / (sl_distance * contract_size) * half_kelly_multiplier
-        2. Scaled by FleetRiskGuard Drawdown Ladder (1.0x Normal, 0.5x De-risk, 0.0x Halted).
-        3. Clamped strictly between min_lot and max_lot.
+           Lots = (Equity * risk_per_trade_pct) / dollar_risk_per_lot * half_kelly_multiplier
+        3. Scaled by FleetRiskGuard Drawdown Ladder & Profit Lock (1.0x Normal, 0.5x De-risk/Lock, 0.0x Halted).
+        4. Clamped strictly between min_lot and effective hard cap (max_lot_gold 0.04, max_lot_btc 0.04, max_lot_fx 0.06).
         """
         multiplier = risk_guard.get_risk_multiplier(account_info)
         if multiplier <= 0.0:
             return 0.0
 
-        if sizing_mode == "dynamic_risk" and sl_distance > 0 and contract_size > 0:
+        # Enforce hard ceiling from Risk Guard if symbol is provided
+        if hasattr(risk_guard, "get_max_lot") and symbol:
+            effective_max_lot = min(max_lot, risk_guard.get_max_lot(symbol))
+        else:
+            effective_max_lot = max_lot
+
+        if sizing_mode == "carver_systematic":
+            lot, _ = risk_guard.calculate_carver_volume(
+                strategy_name=self.name,
+                account_info=account_info,
+                atr_price=sl_distance if sl_distance > 0 else 1.0,
+                contract_size=contract_size,
+                forecast=forecast,
+                min_lot=min_lot,
+                max_lot=effective_max_lot,
+                current_lot=current_lot,
+            )
+            return lot
+
+        if sizing_mode == "dynamic_risk" and sl_distance > 0:
             equity = float(account_info.get("equity", 10000.0))
-            risk_dollar = equity * risk_per_trade_pct
-            dollar_per_lot_risk = sl_distance * contract_size
+            # Normalize percentage (e.g., 0.65 -> 0.0065, or 0.005 -> 0.005)
+            risk_pct = (risk_per_trade_pct / 100.0) if risk_per_trade_pct > 0.05 else risk_per_trade_pct
+            risk_dollar = equity * risk_pct
+
+            # Calculate dollar loss per 1.0 lot at sl_distance
+            dollar_per_lot_risk = 0.0
+            try:
+                import MetaTrader5 as mt5
+                term = mt5.terminal_info()
+                if term is not None and getattr(term, "connected", False) and symbol:
+                    tick = mt5.symbol_info_tick(symbol)
+                    if tick:
+                        p = tick.ask
+                        calc = mt5.order_calc_profit(mt5.ORDER_TYPE_BUY, symbol, 1.0, p, p - sl_distance)
+                        if calc is not None and abs(calc) > 0:
+                            dollar_per_lot_risk = abs(calc)
+            except Exception:
+                pass
+
+            if dollar_per_lot_risk <= 0.0 and contract_size > 0:
+                dollar_per_lot_risk = sl_distance * contract_size
+
             if dollar_per_lot_risk > 0:
-                raw_lot = risk_dollar / dollar_per_lot_risk
-                target_volume = raw_lot * half_kelly_multiplier
+                raw_lot = (risk_dollar / dollar_per_lot_risk) * half_kelly_multiplier
+                target_volume = raw_lot
             else:
                 target_volume = base_volume
         else:
             target_volume = base_volume
 
         scaled = target_volume * multiplier
-        bounded = max(min_lot, min(max_lot, scaled))
+        bounded = max(min_lot, min(effective_max_lot, scaled))
         return round(bounded, 2)
+
 
     def on_tick_update(
         self,

@@ -29,6 +29,9 @@ import pandas as pd
 FLEET_DIR = Path(__file__).resolve().parent
 WORKSPACE_ROOT = FLEET_DIR.parents[2]
 DATA_DIR = FLEET_DIR.parent / "continuum" / "data" / "historical"
+if not DATA_DIR.exists():
+    DATA_DIR = FLEET_DIR.parents[1] / "continuum" / "data" / "historical"
+
 
 if sys.stdout.encoding != 'utf-8':
     try:

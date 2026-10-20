@@ -21,7 +21,11 @@ class FxD1Strategy(BaseStrategy):
         self.symbols = config.get("symbols", ["EURUSDm", "GBPUSDm", "USDJPYm", "AUDUSDm", "USDCADm"])
         self.decision_hour = config.get("decision_utc_hour", 20)
         self.decision_weekdays = config.get("decision_weekdays", [1, 2, 3, 4, 5])
+        self.sizing_mode = config.get("sizing_mode", "dynamic_risk")
+        self.risk_per_trade_pct = config.get("risk_per_trade_pct", 0.40)
         self.base_lot = config.get("base_lot", 0.02)
+        self.min_lot = config.get("min_lot", 0.01)
+        self.max_lot = config.get("max_lot", 0.06)
         self.sl_atr_mult = config.get("sl_atr_multiplier", 1.5)
         self.tp_atr_mult = config.get("tp_atr_multiplier", 2.5)
         self.spread_limit = config.get("spread_limit_points", 50)
@@ -102,16 +106,37 @@ class FxD1Strategy(BaseStrategy):
                         mt5_mgr.close_position(p["ticket"])
                         actions_taken.append(f"CLOSE #{p['ticket']}")
             elif signal is not None:
-                can_open, reason = risk_guard.can_open_position(account_info, len(mt5_mgr.get_positions()))
+                can_open, reason = risk_guard.can_open_position(
+                    account_info=account_info,
+                    current_position_count=len(mt5_mgr.get_positions()),
+                    open_positions=mt5_mgr.get_positions(),
+                    symbol=symbol,
+                    signal=signal
+                )
                 if not can_open:
                     logger.warning(f"⛔ [{self.name}] Risk guard vetoed {symbol}: {reason}")
-                    break
+                    continue
 
                 price = tick["ask"] if signal == "BUY" else tick["bid"]
-                sl = price - (atr * self.sl_atr_mult) if signal == "BUY" else price + (atr * self.sl_atr_mult)
-                tp = price + (atr * self.tp_atr_mult) if signal == "BUY" else price - (atr * self.tp_atr_mult)
+                sl_dist = atr * self.sl_atr_mult
+                tp_dist = atr * self.tp_atr_mult
+                sl = price - sl_dist if signal == "BUY" else price + sl_dist
+                tp = price + tp_dist if signal == "BUY" else price - tp_dist
 
-                order_vol = self.calculate_order_volume(self.base_lot, risk_guard, account_info)
+                contract_size = spec.get("contract_size", 100000.0) if spec else 100000.0
+                order_vol = self.calculate_order_volume(
+                    base_volume=self.base_lot,
+                    risk_guard=risk_guard,
+                    account_info=account_info,
+                    sl_distance=sl_dist,
+                    contract_size=contract_size,
+                    risk_per_trade_pct=self.risk_per_trade_pct,
+                    half_kelly_multiplier=1.0,
+                    sizing_mode=self.sizing_mode,
+                    min_lot=self.min_lot,
+                    max_lot=self.max_lot,
+                    symbol=symbol,
+                )
                 res = mt5_mgr.open_market_order(
                     symbol=symbol,
                     direction=signal,
@@ -123,5 +148,8 @@ class FxD1Strategy(BaseStrategy):
                 )
                 if res.get("success"):
                     actions_taken.append(f"OPEN {symbol} {signal}")
+
+            # Memory hygiene: release DataFrame for this symbol
+            del df
 
         self.last_action = ", ".join(actions_taken) if actions_taken else "HOLD"

@@ -21,16 +21,18 @@ class GoldSessStrategy(BaseStrategy):
         self.symbols = config.get("symbols", ["XAUUSDm", "XAGUSDm"])
         self.session_hours = [8, 13]  # 08:00 UTC (London), 13:00 UTC (New York)
         self.sizing_mode = config.get("sizing_mode", "dynamic_risk")
-        self.risk_per_trade_pct = config.get("risk_per_trade_pct", 0.005)
-        self.half_kelly_mult = config.get("half_kelly_multiplier", 0.50)
-        self.base_lot = config.get("base_lot", 0.05)
+        self.risk_per_trade_pct = config.get("risk_per_trade_pct", 0.65)
+        self.half_kelly_mult = config.get("half_kelly_multiplier", 1.00)
+        self.base_lot = config.get("base_lot", 0.02)
         self.min_lot = config.get("min_lot", 0.01)
-        self.max_lot = config.get("max_lot", 2.0)
+        self.max_lot = config.get("max_lot", 0.04)
+        self.breakeven_trigger_atr = float(config.get("breakeven_trigger_atr", 1.0))
         self.sl_atr_mult = config.get("sl_atr_multiplier", 2.0)
-        self.tp_atr_mult = config.get("tp_atr_multiplier", 2.5)
-        self.spread_limit = config.get("spread_limit_points", 60)
-        self.hourly_mode = config.get("hourly_mode", True)
+        self.tp_atr_mult = config.get("tp_atr_multiplier", 3.0)
+        self.spread_limit = config.get("spread_limit_points", 350)
+        self.hourly_mode = config.get("hourly_mode", False)
         self._last_processed_hour = -1
+        self._last_processed_session = -1
 
     def should_run_cycle(self, now_utc: datetime) -> bool:
         if not self.enabled:
@@ -93,29 +95,49 @@ class GoldSessStrategy(BaseStrategy):
             current_price = tick["bid"]
             atr = last_bar['atr']
 
-            # Session momentum check: EMA9 vs EMA21 on H1
+            # Volatility expansion filter: ATR must be expanding
+            atr_ma = df['atr'].rolling(20).mean().iloc[-2]
+            vol_ok = (atr >= atr_ma * 0.90) if not np.isnan(atr_ma) and atr_ma > 0 else True
+
+            # Breakout Filter:
+            # - London (08:00 UTC): Breakout of Asian Range (00:00 - 07:00 UTC, last 8 H1 bars)
+            # - NY (13:00 UTC): Breakout of London Range (08:00 - 12:00 UTC, last 5 H1 bars)
+            lookback = 8 if now_utc.hour == 8 else 5
+            ref_high = df['high'].iloc[-lookback-1:-1].max()
+            ref_low = df['low'].iloc[-lookback-1:-1].min()
+
+            # Session momentum check: EMA9 vs EMA21 + Breakout
             ema9 = df['close'].ewm(span=9, adjust=False).mean().iloc[-2]
             ema21 = df['close'].ewm(span=21, adjust=False).mean().iloc[-2]
+            c_close = last_bar['close']
 
             existing = [p for p in self.open_positions if p["symbol"] == symbol]
 
-            # Relaxed signal: EMA9 vs EMA21 trend direction
             signal = None
-            if ema9 > ema21:
-                signal = "BUY"
-            elif ema9 < ema21:
-                signal = "SELL"
+            if vol_ok:
+                if ema9 > ema21 and c_close > ref_high:
+                    signal = "BUY"
+                elif ema9 < ema21 and c_close < ref_low:
+                    signal = "SELL"
+                else:
+                    logger.info(
+                        f"ℹ️ [{self.name}] {symbol} inside range (HOLD): "
+                        f"Close={c_close:.2f}, High={ref_high:.2f}, Low={ref_low:.2f}"
+                    )
             else:
-                logger.info(
-                    f"ℹ️ [{self.name}] {symbol} No Signal (HOLD): "
-                    f"Price={current_price:.3f}, EMA9={ema9:.3f}, EMA21={ema21:.3f}"
-                )
+                logger.info(f"ℹ️ [{self.name}] {symbol} Volatility low (ATR {atr:.2f} < MA {atr_ma:.2f}). Skipping.")
 
             if len(existing) > 0:
                 logger.info(f"ℹ️ [{self.name}] {symbol} already has {len(existing)} open position(s). Skipping entry.")
 
             if len(existing) == 0 and signal is not None:
-                can_open, reason = risk_guard.can_open_position(account_info, len(mt5_mgr.get_positions()))
+                can_open, reason = risk_guard.can_open_position(
+                    account_info=account_info,
+                    current_position_count=len(mt5_mgr.get_positions()),
+                    open_positions=mt5_mgr.get_positions(),
+                    symbol=symbol,
+                    signal=signal
+                )
                 if not can_open:
                     logger.warning(f"⛔ [{self.name}] Risk veto for {symbol}: {reason}")
                     continue
@@ -138,6 +160,7 @@ class GoldSessStrategy(BaseStrategy):
                     sizing_mode=self.sizing_mode,
                     min_lot=self.min_lot,
                     max_lot=self.max_lot,
+                    symbol=symbol,
                 )
                 res = mt5_mgr.open_market_order(
                     symbol=symbol,
@@ -150,6 +173,9 @@ class GoldSessStrategy(BaseStrategy):
                 )
                 if res.get("success"):
                     actions.append(f"OPEN {symbol} {signal} {order_vol}L")
+
+            # Memory hygiene: release DataFrame
+            del df
 
         self.last_action = ", ".join(actions) if actions else "HOLD"
 
@@ -199,7 +225,7 @@ class GoldSessStrategy(BaseStrategy):
             if atr <= 0:
                 continue
 
-            be_threshold = 1.5 * atr
+            be_threshold = self.breakeven_trigger_atr * atr
             trail_threshold = 2.0 * atr
             buffer_points = 10 * point  # Buffer covering spread/slippage
 
@@ -210,7 +236,7 @@ class GoldSessStrategy(BaseStrategy):
                     new_sl = open_price + buffer_points
                     logger.info(
                         f"🛡️ [{self.name}] Breakeven triggered for {symbol} BUY #{ticket}: "
-                        f"Gain +${gain:.2f} >= +${be_threshold:.2f} (1.5x ATR). Moving SL to {new_sl:.3f}"
+                        f"Gain +${gain:.2f} >= +${be_threshold:.2f} ({self.breakeven_trigger_atr}x ATR). Moving SL to {new_sl:.3f}"
                     )
                     mt5_mgr.modify_position(ticket=ticket, sl=new_sl, tp=current_tp)
                     current_sl = new_sl
@@ -232,7 +258,7 @@ class GoldSessStrategy(BaseStrategy):
                     new_sl = open_price - buffer_points
                     logger.info(
                         f"🛡️ [{self.name}] Breakeven triggered for {symbol} SELL #{ticket}: "
-                        f"Gain +${gain:.2f} >= +${be_threshold:.2f} (1.5x ATR). Moving SL to {new_sl:.3f}"
+                        f"Gain +${gain:.2f} >= +${be_threshold:.2f} ({self.breakeven_trigger_atr}x ATR). Moving SL to {new_sl:.3f}"
                     )
                     mt5_mgr.modify_position(ticket=ticket, sl=new_sl, tp=current_tp)
                     current_sl = new_sl

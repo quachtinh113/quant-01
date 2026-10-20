@@ -13,6 +13,7 @@ UNIFIED QUANT FLEET — MASTER ORCHESTRATOR
 import os
 import sys
 import time
+import gc
 import signal
 import threading
 from pathlib import Path
@@ -32,8 +33,11 @@ if sys.stdout.encoding != 'utf-8':
         pass
 
 from core.audit_logger import setup_logger, get_logger
-from core.mt5_connection_manager import MT5ConnectionManager
+from core.mt5_connection_manager import MT5ConnectionManager, MAX_ALLOWED_SPREAD_POINTS
 from core.fleet_risk_guard import FleetRiskGuard
+from core.correlation_risk_manager import CorrelationRiskManager
+from core.dynamic_covariance_risk import DynamicCovarianceRiskManager
+from core.market_cadence_manager import MarketCadenceManager
 from strategies.bot1_btc_8h import Btc8hStrategy
 from strategies.bot2_fx_d1 import FxD1Strategy
 from strategies.bot3_gold_sess import GoldSessStrategy
@@ -82,6 +86,41 @@ def restore_windows_sleep():
             ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS)
     except Exception:
         pass
+
+
+def optimize_memory():
+    """Trigger Python garbage collection and trim Windows working set to minimize RAM footprint."""
+    try:
+        gc.collect()
+        if os.name == 'nt' and hasattr(ctypes, 'windll') and hasattr(ctypes.windll, 'psapi'):
+            ctypes.windll.psapi.EmptyWorkingSet(ctypes.windll.kernel32.GetCurrentProcess())
+    except Exception:
+        pass
+
+
+def get_codebase_fingerprint(base_dir=None, watch_dirs=["core", "strategies", "config"], extensions=[".py", ".yaml"]) -> float:
+    """Get the latest modification timestamp across all watched files in codebase."""
+    if base_dir is None:
+        base_dir = _ROOT
+    latest_mtime = 0.0
+    for root_file in ["run_unified_bot.py"]:
+        p = Path(base_dir) / root_file
+        if p.exists():
+            try:
+                latest_mtime = max(latest_mtime, p.stat().st_mtime)
+            except OSError:
+                pass
+    for folder in watch_dirs:
+        folder_path = Path(base_dir) / folder
+        if not folder_path.exists():
+            continue
+        for ext in extensions:
+            for p in folder_path.rglob(f"*{ext}"):
+                try:
+                    latest_mtime = max(latest_mtime, p.stat().st_mtime)
+                except OSError:
+                    pass
+    return latest_mtime
 
 
 def handle_shutdown(signum, frame):
@@ -139,8 +178,9 @@ def print_fleet_dashboard(account_info, risk_status, bot_summaries):
         f"Balance: ${account_info.get('balance', 0):,.2f} | Equity: ${account_info.get('equity', 0):,.2f} | "
         f"Margin Level: {account_info.get('margin_level', 0):.1f}%",
         f" Daily Peak: ${risk_status.get('daily_peak_equity', 0):,.2f} | "
-        f"Current DD: ${risk_status.get('current_drawdown_usd', 0):.2f} / Max ${risk_status.get('drawdown_limit_usd', 0):.2f} | "
-        f"Status: {'🔴 HALTED' if risk_status.get('is_halted') else '🟢 ACTIVE'}",
+        f"DD: ${risk_status.get('current_drawdown_usd', 0):.2f} / Max ${risk_status.get('drawdown_limit_usd', 0):.2f} | "
+        f"Daily PnL: ${risk_status.get('daily_pnl_usd', 0):+.2f} ({risk_status.get('daily_pnl_pct', 0):+.2f}%) | "
+        f"Status: {'🔴 HALTED' if risk_status.get('is_halted') else ('🟡 0.5x DERISK/LOCK' if risk_status.get('risk_multiplier') == 0.5 else '🟢 ACTIVE')}",
         "------------------------------------------------------------------------------------------",
         f" {'Bot Name':<16} | {'Magic':<7} | {'Status':<8} | {'Open Pos':<8} | {'Unrealized P/L':<14} | {'Last Action'}",
         "------------------------------------------------------------------------------------------",
@@ -181,12 +221,44 @@ def main():
         # We still proceed into the loop to let auto-reconnect retry
 
     # 2. Risk Guard
+    carver_cfg = config.get("carver_portfolio", {})
     risk_guard = FleetRiskGuard(
-        max_daily_drawdown_usd=float(risk_cfg.get("max_daily_drawdown_usd", 300.0)),
+        max_daily_drawdown_usd=float(risk_cfg.get("max_daily_loss_usd", risk_cfg.get("max_daily_drawdown_usd", 150.0))),
+        max_daily_drawdown_pct=float(risk_cfg.get("max_daily_loss_pct", 1.5)) / 100.0 if float(risk_cfg.get("max_daily_loss_pct", 1.5)) > 0.05 else float(risk_cfg.get("max_daily_loss_pct", 0.015)),
+        max_daily_loss_usd=float(risk_cfg.get("max_daily_loss_usd", risk_cfg.get("max_daily_drawdown_usd", 150.0))),
+        max_daily_loss_pct=float(risk_cfg.get("max_daily_loss_pct", 1.5)) / 100.0 if float(risk_cfg.get("max_daily_loss_pct", 1.5)) > 0.05 else float(risk_cfg.get("max_daily_loss_pct", 0.015)),
+        daily_profit_target_pct=float(risk_cfg.get("daily_profit_target_pct", 1.5)) / 100.0 if float(risk_cfg.get("daily_profit_target_pct", 1.5)) > 0.05 else float(risk_cfg.get("daily_profit_target_pct", 0.015)),
+        daily_profit_target_usd=float(risk_cfg.get("daily_profit_target_usd", 150.0)),
+        max_total_open_risk_pct=float(risk_cfg.get("max_total_open_risk_pct", 2.0)) / 100.0 if float(risk_cfg.get("max_total_open_risk_pct", 2.0)) > 0.05 else float(risk_cfg.get("max_total_open_risk_pct", 0.02)),
         min_margin_level_percent=float(risk_cfg.get("min_margin_level_percent", 200.0)),
-        max_total_positions=int(risk_cfg.get("max_total_positions", 10)),
-        halt_file=str(_ROOT / "HALT_FLEET")
+        max_total_positions=int(risk_cfg.get("max_total_open_positions", risk_cfg.get("max_total_positions", 10))),
+        halt_file=str(_ROOT / "HALT_FLEET"),
+        annual_target_vol_pct=float(carver_cfg.get("annual_target_vol_pct", 16.0)),
+        idm=float(carver_cfg.get("idm", 1.42)),
+        max_lot_gold=float(risk_cfg.get("max_lot_gold", 0.04)),
+        max_lot_btc=float(risk_cfg.get("max_lot_btc", 0.04)),
+        max_lot_fx=float(risk_cfg.get("max_lot_fx", 0.06)),
     )
+
+    # 2b. Correlation & Exposure Gatekeeper (Max Net USD Exposure)
+    max_net_usd = int(risk_cfg.get("max_net_usd_units", 2))
+    correlation_manager = CorrelationRiskManager(max_net_usd_units=max_net_usd)
+    risk_guard.set_correlation_manager(correlation_manager)
+    mt5_mgr.set_correlation_manager(correlation_manager)
+
+    # 2c. Dynamic Ledoit-Wolf Covariance Gatekeeper (Regime-Aware Risk)
+    dyn_cov_cfg = risk_cfg.get("dynamic_covariance", {})
+    if dyn_cov_cfg.get("enabled", True):
+        dyn_cov_manager = DynamicCovarianceRiskManager(
+            symbols=dyn_cov_cfg.get("symbols", None),
+            timeframe=dyn_cov_cfg.get("timeframe", "H1"),
+            lookback=int(dyn_cov_cfg.get("lookback", 90)),
+            max_portfolio_vol=float(dyn_cov_cfg.get("max_portfolio_vol", 0.035)),
+            max_pairwise_corr=float(dyn_cov_cfg.get("max_pairwise_corr", 0.75)),
+            mt5_mgr=mt5_mgr
+        )
+        dyn_cov_manager.update_covariance_matrix()
+        risk_guard.set_dynamic_covariance_manager(dyn_cov_manager)
 
     # 3. Instantiate the 5 Strategies
     strategies = [
@@ -200,13 +272,22 @@ def main():
     logger.info(f"✨ Successfully loaded {len(strategies)} strategy engines:")
     for s in strategies:
         logger.info(f"   - {s.name:<16} (Magic: {s.magic}, Enabled: {s.enabled})")
+    logger.info(f"🛡️ Execution Layer: Max Spread Filter ACTIVE ({len(MAX_ALLOWED_SPREAD_POINTS)} rules configured).")
 
-    # 4. Watchdog Thread
+    # 4. Market Cadence & Session Manager
+    cadence_mgr = MarketCadenceManager()
+
+    # 4b. Watchdog Thread & Code Watcher
     watchdog = Watchdog(timeout_seconds=180)
     watchdog.start()
 
+    initial_fingerprint = get_codebase_fingerprint()
+    last_watcher_check = time.time()
+    logger.info("👀 Code Watcher ACTIVE: Auto-reload on file edits (core/, strategies/, config/).")
+
     loop_interval = system_cfg.get("loop_interval_seconds", 15)
     last_dashboard_time = 0.0
+    last_gc_time = 0.0
 
     logger.info(f"🔄 Starting Master Execution Loop (interval = {loop_interval}s)...")
 
@@ -215,6 +296,18 @@ def main():
         try:
             watchdog.ping()
             now_utc = datetime.now(timezone.utc)
+            now_ts = time.time()
+
+            # Hot-Reload Watcher: Check if any code files were updated
+            if now_ts - last_watcher_check >= 15.0:
+                last_watcher_check = now_ts
+                current_fp = get_codebase_fingerprint()
+                if current_fp > initial_fingerprint:
+                    logger.info("⚡ [WATCHDOG] Code modification detected! Initiating graceful reload (exit code 42)...")
+                    watchdog.running = False
+                    mt5_mgr.shutdown()
+                    restore_windows_sleep()
+                    sys.exit(42)
 
             # Ensure MT5 is online
             if not mt5_mgr.ensure_connected():
@@ -232,8 +325,16 @@ def main():
             risk_status = risk_guard.get_status(account_info)
 
             # Evaluate each bot
+            cycle_executed = False
             for strat in strategies:
                 if not strat.enabled:
+                    continue
+
+                # Session & Holiday Cadence Check:
+                # BTC_8H runs 24/7/365; Forex / Metals idle when market is closed
+                is_open, open_reason = cadence_mgr.is_strategy_active_in_session(strat.name, now_utc, mt5_mgr)
+                if not is_open:
+                    strat.last_action = f"IDLE_MARKET_CLOSED ({open_reason})"
                     continue
 
                 # 1. Real-time tick hook (Take profit, time decay, basket checks)
@@ -242,17 +343,31 @@ def main():
                 # 2. Scheduled cycle check (Bar close / session window)
                 if strat.should_run_cycle(now_utc):
                     strat.evaluate_cycle(now_utc, mt5_mgr, risk_guard, account_info)
+                    cycle_executed = True
                 else:
                     # Sync open positions periodically
                     strat.sync_positions(mt5_mgr)
 
+            now_ts = time.time()
+
             # Dashboard refresh every 60 seconds
-            if time.time() - last_dashboard_time >= 60.0:
-                last_dashboard_time = time.time()
+            if now_ts - last_dashboard_time >= 60.0:
+                last_dashboard_time = now_ts
                 bot_summaries = [s.get_summary() for s in strategies]
                 print_fleet_dashboard(account_info, risk_status, bot_summaries)
 
-            time.sleep(loop_interval)
+            # RAM & Performance Hygiene: Clean garbage & trim working set after cycles or every 60s
+            if cycle_executed or (now_ts - last_gc_time >= 60.0):
+                last_gc_time = now_ts
+                optimize_memory()
+
+            # Adaptive sleep: 15s active, 60s idle when traditional markets are closed
+            adaptive_sleep = cadence_mgr.get_adaptive_loop_interval(
+                dt_utc=now_utc,
+                base_interval=loop_interval,
+                idle_interval=int(system_cfg.get("weekend_loop_interval_seconds", 60))
+            )
+            time.sleep(adaptive_sleep)
 
         except Exception as e:
             logger.error(f"⚠️ Unhandled error in Master Loop: {e}", exc_info=True)

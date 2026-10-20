@@ -9,7 +9,7 @@ import time
 import math
 import logging
 import threading
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 from datetime import datetime, timezone
 import pandas as pd
 
@@ -35,10 +35,28 @@ TIMEFRAME_MAP = {
     "D1": mt5.TIMEFRAME_D1 if MT5_AVAILABLE else 16408,
 }
 
+# =====================================================================
+# MAX ALLOWED SPREAD LIMITS (Execution Layer Guard - Points)
+# Protects against spread expansion during rollovers / high-impact news
+# =====================================================================
+MAX_ALLOWED_SPREAD_POINTS = {
+    "BTCUSD": 5000,    # Tuỳ theo quy cách contract của Exness
+    "BTCUSDm": 5000,
+    "XAUUSD": 60,      # ~60 points = 6 pips
+    "XAUUSDm": 60,
+    "EURUSD": 30,      # 3 pips
+    "EURUSDm": 30,
+    "GBPUSD": 35,
+    "GBPUSDm": 35,
+    "USDJPY": 30,
+    "USDJPYm": 30,
+    "DEFAULT": 50
+}
+
 
 class MT5ConnectionManager:
     _instance = None
-    _lock = threading.Lock()
+    _lock = threading.RLock()
 
     def __new__(cls, *args, **kwargs):
         with cls._lock:
@@ -57,7 +75,12 @@ class MT5ConnectionManager:
         self.server = server or os.getenv("MT5_SERVER", "")
         self.connected = False
         self._last_health_check = 0.0
+        self.correlation_manager = None
         self._initialized = True
+
+    def set_correlation_manager(self, manager) -> None:
+        """Attach CorrelationRiskManager to Execution Layer."""
+        self.correlation_manager = manager
 
     def connect(self) -> bool:
         """Initialize and login to MetaTrader 5."""
@@ -325,6 +348,31 @@ class MT5ConnectionManager:
             return mt5.ORDER_FILLING_RETURN
         return mt5.ORDER_FILLING_IOC
 
+    def is_spread_acceptable(self, symbol: str) -> Tuple[bool, float, float]:
+        """
+        Check if the current spread is acceptable under MAX_ALLOWED_SPREAD_POINTS.
+        Returns: (is_acceptable, spread_points, max_limit)
+        """
+        spec = self.get_symbol_spec(symbol)
+        tick = self.get_tick(symbol)
+        if not spec or not tick:
+            return False, 999999.0, 0.0
+
+        point = spec.get("point", 0.00001)
+        spread_points = (tick["ask"] - tick["bid"]) / point if point > 0 else 999999.0
+
+        canonical = symbol
+        for suffix in ["m", ".pro", "c", "_i", ".a"]:
+            if canonical.endswith(suffix):
+                canonical = canonical[:-len(suffix)]
+                break
+
+        limit = MAX_ALLOWED_SPREAD_POINTS.get(
+            symbol,
+            MAX_ALLOWED_SPREAD_POINTS.get(canonical, MAX_ALLOWED_SPREAD_POINTS.get("DEFAULT", 50))
+        )
+        return (spread_points <= limit), spread_points, float(limit)
+
     def open_market_order(
         self,
         symbol: str,
@@ -347,6 +395,42 @@ class MT5ConnectionManager:
         tick = self.get_tick(symbol)
         if not tick:
             return {"success": False, "error": f"Failed to get tick for {symbol}"}
+
+        # Spread Protection Filter (Execution Layer Guard)
+        point = spec.get("point", 0.00001)
+        spread_points = (tick["ask"] - tick["bid"]) / point if point > 0 else 999999.0
+
+        canonical = symbol
+        for suffix in ["m", ".pro", "c", "_i", ".a"]:
+            if canonical.endswith(suffix):
+                canonical = canonical[:-len(suffix)]
+                break
+
+        limit = MAX_ALLOWED_SPREAD_POINTS.get(
+            symbol,
+            MAX_ALLOWED_SPREAD_POINTS.get(canonical, MAX_ALLOWED_SPREAD_POINTS.get("DEFAULT", 50))
+        )
+
+        if spread_points > limit:
+            logger.warning(
+                f"⚠️ [SPREAD FILTER] {symbol} spread too wide: {spread_points:.1f} pts > max {limit} pts. Order rejected."
+            )
+            return {
+                "success": False,
+                "error": f"[SPREAD FILTER] {symbol} spread too wide: {spread_points:.1f} pts > max {limit} pts",
+                "spread_points": spread_points,
+                "max_limit": limit,
+            }
+
+        # Correlation & Exposure Gatekeeper (Execution Layer Defense-in-depth)
+        if self.correlation_manager is not None:
+            open_pos = self.get_positions()
+            allowed, reason = self.correlation_manager.can_execute_order(symbol, direction, open_pos)
+            if not allowed:
+                return {
+                    "success": False,
+                    "error": f"[RISK GATEKEEPER] {reason}"
+                }
 
         order_type = mt5.ORDER_TYPE_BUY if direction.upper() == "BUY" else mt5.ORDER_TYPE_SELL
         price = tick["ask"] if direction.upper() == "BUY" else tick["bid"]
